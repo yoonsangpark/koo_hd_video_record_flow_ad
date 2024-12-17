@@ -1144,7 +1144,7 @@ MAIN(argc, argv)
 	VIDEO_RECORD stream2[1] = {0}; //0: record stream
 	UINT32 stream_list[2] = {((UINT32)&stream[0]), ((UINT32)&stream2[0])};
 	UINT32 out_type = 1;
-	UINT32 enc_type = 0;
+	UINT32 enc_type = 1;
 
 	// query program options
 	if (argc >= 2) {
@@ -1229,7 +1229,7 @@ MAIN(argc, argv)
 if(1)
 {
 	stream2[0].sel_rec_size = 0;
-	stream2[0].enc_type = 0;
+	stream2[0].enc_type = 1;
 	stream2[0].flow_run = FLOW_ON_REC; //start record
 	while (stream2[0].flow_state != FLOW_ON_REC) usleep(100); //wait unitl flow record		
 }
