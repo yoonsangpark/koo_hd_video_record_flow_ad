@@ -889,7 +889,7 @@ static void *save_thread(void *arg)
 			p_stream0->record_dim.w, p_stream0->record_dim.h,
 			p_stream0->save_count+1);
 	} else if (p_stream0->enc_type == 1) {
-		snprintf(file_path_main, 64, "/mnt/sd/rec_%lux%lu_%lu_h264.mp4",
+		snprintf(file_path_main, 64, "/mnt/sd/recordings/rec_%lux%lu_%lu_h264.mp4",
 			p_stream0->record_dim.w, p_stream0->record_dim.h,
 			p_stream0->save_count+1);
 	} else if (p_stream0->enc_type == 2) {
