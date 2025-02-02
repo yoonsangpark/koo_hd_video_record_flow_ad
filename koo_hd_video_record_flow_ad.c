@@ -20,6 +20,7 @@
 #include "hdal.h"
 #include "hd_debug.h"
 #include "vendor_videocapture.h"
+#include <sys/stat.h>
 
 // platform dependent
 #if defined(__LINUX)
@@ -43,12 +44,26 @@
 
 #define DEBUG_MENU 		1
 
+#define AUDIO_OUT_ENABLE
+#define AD_ENABLE 1 
+
 #define CHKPNT			printf("\033[37mCHK: %s, %s: %d\033[0m\r\n",__FILE__,__func__,__LINE__)
 #define DBGH(x)			printf("\033[0;35m%s=0x%08X\033[0m\r\n", #x, x)
 #define DBGD(x)			printf("\033[0;35m%s=%d\033[0m\r\n", #x, x)
 
 
 #define MOVIE_BRC_MODE      0 //1: Movie BRC mode , 0: fix quality mode
+#ifdef AUDIO_OUT_ENABLE
+#define BITSTREAM_SIZE      12800
+#define FRAME_SAMPLES       1024
+#define AUD_BUFFER_CNT      5
+
+#define AUDOUT_SR       HD_AUDIO_SR_16000
+#define AUDOUT_BIT      HD_AUDIO_BIT_WIDTH_16
+#define AUDOUT_MODE     HD_AUDIO_SOUND_MODE_MONO //HD_AUDIO_SOUND_MODE_STEREO
+#define AUDOUT_MONO     HD_AUDIO_MONO_LEFT
+#endif
+#define TIME_DIFF(new_val, old_val)     ((int)(new_val) - (int)(old_val))
 
 ///////////////////////////////////////////////////////////////////////////////
 
@@ -73,7 +88,6 @@
 
 ///////////////////////////////////////////////////////////////////////////////
 
-#define AD_ENABLE 1 
 #ifdef AD_ENABLE  // YUV 
 #define SEN_OUT_FMT		HD_VIDEO_PXLFMT_YUV422
 #define CAP_OUT_FMT		HD_VIDEO_PXLFMT_YUV420
@@ -140,6 +154,13 @@ static HD_RESULT mem_init(void)
 	mem_cfg.pool_info[2].blk_cnt = 3;
 	mem_cfg.pool_info[2].ddr_id = DDR_ID0;
 
+#ifdef AUDIO_OUT_ENABLE
+	/* user buffer for bs pushing in */
+	mem_cfg.pool_info[3].type = HD_COMMON_MEM_USER_POOL_BEGIN;
+	mem_cfg.pool_info[3].blk_size = 0x100000;
+	mem_cfg.pool_info[3].blk_cnt = 1;
+	mem_cfg.pool_info[3].ddr_id = DDR_ID0;	
+#endif
 	ret = hd_common_mem_init(&mem_cfg);
 	return ret;
 }
@@ -665,6 +686,76 @@ static HD_RESULT set_enc_param(HD_PATH_ID video_enc_path, HD_DIM *p_dim, UINT32 
 	return ret;
 }
 
+#ifdef AUDIO_OUT_ENABLE
+// set_aout_cfg
+static HD_RESULT set_aout_cfg(HD_PATH_ID *p_audio_out_ctrl, HD_AUDIO_SR sample_rate)
+{
+	HD_RESULT ret = HD_OK;
+	HD_AUDIOOUT_DEV_CONFIG audio_cfg_param = {0};
+	HD_AUDIOOUT_DRV_CONFIG audio_driver_cfg_param = {0};
+	HD_PATH_ID audio_out_ctrl = 0;
+
+	ret = hd_audioout_open(0, HD_AUDIOOUT_0_CTRL, &audio_out_ctrl); //open this for device control
+	if (ret != HD_OK) {
+		return ret;
+	}
+
+	/* set audio out maximum parameters */
+	audio_cfg_param.out_max.sample_rate = sample_rate;
+	audio_cfg_param.out_max.sample_bit = AUDOUT_BIT;
+	audio_cfg_param.out_max.mode = AUDOUT_MODE;
+	audio_cfg_param.frame_sample_max = 1024;
+	audio_cfg_param.frame_num_max = 10;
+	audio_cfg_param.in_max.sample_rate = 0;
+	ret = hd_audioout_set(audio_out_ctrl, HD_AUDIOOUT_PARAM_DEV_CONFIG, &audio_cfg_param);
+	if (ret != HD_OK) {
+		return ret;
+	}
+
+	/* set audio out driver parameters */
+	audio_driver_cfg_param.mono = AUDOUT_MONO;
+	audio_driver_cfg_param.output = HD_AUDIOOUT_OUTPUT_SPK;
+	ret = hd_audioout_set(audio_out_ctrl, HD_AUDIOOUT_PARAM_DRV_CONFIG, &audio_driver_cfg_param);
+
+	*p_audio_out_ctrl = audio_out_ctrl;
+
+	return ret;
+}
+
+static HD_RESULT set_aout_param(HD_PATH_ID audio_out_ctrl, HD_PATH_ID audio_out_path, HD_AUDIO_SR sample_rate)
+{
+	HD_RESULT ret;
+	HD_AUDIOOUT_OUT audio_out_out_param = {0};
+	HD_AUDIOOUT_VOLUME audio_out_vol = {0};
+	HD_AUDIOOUT_IN audio_out_in_param = {0};
+
+	// set hd_audioout output parameters
+	audio_out_out_param.sample_rate = sample_rate;
+	audio_out_out_param.sample_bit = AUDOUT_BIT;
+	audio_out_out_param.mode = AUDOUT_MODE;
+	ret = hd_audioout_set(audio_out_path, HD_AUDIOOUT_PARAM_OUT, &audio_out_out_param);
+	if (ret != HD_OK) {
+		return ret;
+	}
+
+	// set hd_audioout volume
+	audio_out_vol.volume = 100;
+	ret = hd_audioout_set(audio_out_ctrl, HD_AUDIOOUT_PARAM_VOLUME, &audio_out_vol);
+	if (ret != HD_OK) {
+		return ret;
+	}
+
+
+	// set hd_audioout input parameters
+	audio_out_in_param.sample_rate = 0;
+	ret = hd_audioout_set(audio_out_path, HD_AUDIOOUT_PARAM_IN, &audio_out_in_param);
+
+	return ret;
+}
+
+#endif
+
+
 ///////////////////////////////////////////////////////////////////////////////
 
 typedef struct _VIDEO_RECORD_SIZE {
@@ -752,6 +843,20 @@ typedef struct _VIDEO_RECORD {
 
 } VIDEO_RECORD;
 
+
+#ifdef AUDIO_OUT_ENABLE
+typedef struct _AUDIO_OUTONLY {
+	HD_AUDIO_SR sample_rate_max;
+	HD_AUDIO_SR sample_rate;
+
+	HD_PATH_ID out_ctrl;
+	HD_PATH_ID out_path;
+
+	UINT32 out_exit;
+	UINT32 out_pause;
+} AUDIO_OUTONLY;
+#endif
+
 static HD_RESULT init_module(void)
 {
 	HD_RESULT ret;
@@ -763,6 +868,10 @@ static HD_RESULT init_module(void)
 		return ret;
     if ((ret = hd_videoenc_init()) != HD_OK)
 		return ret;
+#ifdef AUDIO_OUT_ENABLE		
+	if((ret = hd_audioout_init()) != HD_OK)
+		return ret;		
+#endif 		
 	return HD_OK;
 }
 
@@ -816,6 +925,21 @@ static HD_RESULT open_module_2(VIDEO_RECORD *p_stream, HD_DIM* p_proc_max_dim, H
 	return HD_OK;
 }
 
+#ifdef AUDIO_OUT_ENABLE
+static HD_RESULT open_module_audio(AUDIO_OUTONLY *p_outonly)
+{
+	HD_RESULT ret;
+	ret = set_aout_cfg(&p_outonly->out_ctrl, p_outonly->sample_rate_max);
+	if (ret != HD_OK) {
+		printf("set out-cfg fail\n");
+		return HD_ERR_NG;
+	}
+	if((ret = hd_audioout_open(HD_AUDIOOUT_0_IN_0, HD_AUDIOOUT_0_OUT_0, &p_outonly->out_path)) != HD_OK)
+		return ret;
+	return HD_OK;
+}
+#endif 
+
 static HD_RESULT close_module(VIDEO_LIVEVIEW *p_stream)
 {
 	HD_RESULT ret;
@@ -837,7 +961,15 @@ static HD_RESULT close_module_2(VIDEO_RECORD *p_stream)
 		return ret;
 	return HD_OK;
 }
-
+#ifdef AUDIO_OUT_ENABLE
+static HD_RESULT close_module_audio(AUDIO_OUTONLY *p_outonly)
+{
+	HD_RESULT ret;
+	if((ret = hd_audioout_close(p_outonly->out_path)) != HD_OK)
+		return ret;
+	return HD_OK;
+}
+#endif 
 static HD_RESULT exit_module(void)
 {
 	HD_RESULT ret;
@@ -849,6 +981,10 @@ static HD_RESULT exit_module(void)
 		return ret;
 	if ((ret = hd_videoenc_uninit()) != HD_OK)
 		return ret;
+#ifdef AUDIO_OUT_ENABLE
+	if((ret = hd_audioout_uninit()) != HD_OK)
+		return ret;
+#endif 
 	return HD_OK;
 }
 
@@ -889,7 +1025,7 @@ static void *save_thread(void *arg)
 			p_stream0->record_dim.w, p_stream0->record_dim.h,
 			p_stream0->save_count+1);
 	} else if (p_stream0->enc_type == 1) {
-		snprintf(file_path_main, 64, "/mnt/sd/recordings/rec_%lux%lu_%lu_h264.mp4",
+		snprintf(file_path_main, 64, "/mnt/sd/rec_%lux%lu_%lu_h264.mp4",
 			p_stream0->record_dim.w, p_stream0->record_dim.h,
 			p_stream0->save_count+1);
 	} else if (p_stream0->enc_type == 2) {
@@ -1136,15 +1272,167 @@ exit2:
 	return 0;
 }
 
+#ifdef AUDIO_OUT_ENABLE
+static void *playback_thread(void *arg)
+{
+	INT ret, bs_size, result;
+	CHAR filename[50];
+	FILE *bs_fd;
+	HD_AUDIO_FRAME  bs_in_buf = {0};
+	HD_COMMON_MEM_VB_BLK blk;
+	uintptr_t pa, va;
+	UINT32 blk_size = 0x100000;
+	HD_COMMON_MEM_DDR_ID ddr_id = DDR_ID0;
+	uintptr_t bs_buf_start, bs_buf_curr, bs_buf_end;
+	INT au_frame_ms, elapse_time, au_buf_time;
+	UINT start_time, data_time;
+	AUDIO_OUTONLY *p_out_only = (AUDIO_OUTONLY *)arg;
+	struct stat st;
+	int nLength = 0, play_size = 0;
+
+	/* read test pattern */
+	snprintf(filename, sizeof(filename), "/mnt/sd/snd.pcm"); 
+	lstat(filename, &st);
+	nLength = st.st_size;
+
+	bs_fd = fopen(filename, "rb");
+	if (bs_fd == NULL) {
+		printf("[ERROR] Open %s failed!!\n", filename);
+		return 0;
+	}
+	printf("play file: [%s], nLength[%d]\n", filename, nLength);
+
+	au_frame_ms = FRAME_SAMPLES * 1000 / p_out_only->sample_rate - 5;
+	start_time = hd_gettime_ms();
+	data_time = 0;
+
+	/* get memory */
+	blk = hd_common_mem_get_block(HD_COMMON_MEM_USER_POOL_BEGIN, blk_size, ddr_id); 
+	if (blk == HD_COMMON_MEM_VB_INVALID_BLK) {
+		printf("get block fail, blk = 0x%x\n", blk);
+		goto play_fclose;
+	}
+	pa = hd_common_mem_blk2pa(blk); // get physical addr
+	if (pa == 0) {
+		printf("blk2pa fail, blk(0x%x)\n", blk);
+		goto rel_blk;
+	}
+	if (pa > 0) {
+		va = (uintptr_t)hd_common_mem_mmap(HD_COMMON_MEM_MEM_TYPE_CACHE, pa, blk_size); 
+		if (va == 0) {
+			printf("get va fail, va(0x%lx)\n", (unsigned long)blk);
+			goto rel_blk;
+		}
+		/* allocate bs buf */
+		bs_buf_start = va;
+		bs_buf_curr = bs_buf_start;
+		bs_buf_end = bs_buf_start + (unsigned long)blk_size; 
+		printf("alloc bs_buf: start(0x%lx) curr(0x%lx) end(0x%lx) size(0x%lx)\n", (unsigned long)bs_buf_start, (unsigned long)bs_buf_curr, (unsigned long)bs_buf_end, (unsigned long)blk_size);
+	}
+
+	memset((void *)bs_buf_start, 0, blk_size);
+	/* read bs from file */
+	result = fread((void *)bs_buf_start, 1, nLength, bs_fd);
+	if (result != nLength) {
+		printf("reading error\n");
+		goto rel_blk;
+	}
+	if (bs_fd != NULL) { fclose(bs_fd); bs_fd = NULL; }
+
+	play_size = nLength;
+
+	while (1) {
+retry:
+		if (p_out_only->out_exit == 1) {
+			break;
+		}
+
+		if (p_out_only->out_pause == 1) {
+			usleep(10000);
+			goto retry;
+		}
+		if (play_size >= FRAME_SAMPLES) {
+			bs_size = FRAME_SAMPLES;
+		} else {
+			bs_size = play_size;
+			play_size = 0;
+		}
+
+		elapse_time = TIME_DIFF(hd_gettime_ms(), start_time);
+		au_buf_time = data_time - elapse_time;
+		if (au_buf_time > AUD_BUFFER_CNT * au_frame_ms) {
+			//usleep(au_frame_ms);
+			//goto retry;
+		}
+
+		/* check bs buf rollback */
+		if ((bs_buf_curr + (unsigned long)bs_size) > bs_buf_end) {
+			bs_buf_curr = bs_buf_start;
+		}
+
+		bs_in_buf.sign = MAKEFOURCC('A','F','R','M');
+		bs_in_buf.phy_addr[0] = pa + (bs_buf_curr - bs_buf_start); // needs to add offset
+		bs_in_buf.size = bs_size;
+		bs_in_buf.ddr_id = ddr_id;
+		bs_in_buf.timestamp = hd_gettime_us();
+		bs_in_buf.bit_width = AUDOUT_BIT;
+		bs_in_buf.sound_mode = AUDOUT_MODE;
+		bs_in_buf.sample_rate = p_out_only->sample_rate;
+
+		/* push in buffer */
+		data_time += au_frame_ms;
+resend:
+		ret = hd_audioout_push_in_buf(p_out_only->out_path, &bs_in_buf, -1);
+		if (ret != HD_OK) {
+			usleep(10000);
+			goto resend;
+		}
+
+		bs_buf_curr += ALIGN_CEIL_4(bs_size); // shift to next
+		play_size -= bs_size;
+		if (play_size <= 0) {
+			play_size = nLength;
+			bs_buf_curr = bs_buf_start;
+
+			/* ooSSoo */
+			break;
+
+		}
+	}
+
+	/* release memory */
+	hd_common_mem_munmap((void*)va, blk_size);
+rel_blk:
+	ret = hd_common_mem_release_block(blk);
+	if (HD_OK != ret) {
+		printf("release blk fail, ret(%d)\n", ret);
+		goto play_fclose;
+	}
+
+play_fclose:
+	if (bs_fd != NULL) {
+		fclose(bs_fd);
+	}
+
+	return 0;
+}
+#endif 
+
+
 MAIN(argc, argv)
 {
 	HD_RESULT ret;
-	INT key;
 	VIDEO_LIVEVIEW stream[1] = {0}; //0: liveview stream
 	VIDEO_RECORD stream2[1] = {0}; //0: record stream
 	UINT32 stream_list[2] = {((UINT32)&stream[0]), ((UINT32)&stream2[0])};
 	UINT32 out_type = 1;
-	UINT32 enc_type = 1;
+	UINT32 enc_type = 0;
+
+
+#ifdef AUDIO_OUT_ENABLE
+	pthread_t out_thread_id;
+	AUDIO_OUTONLY outonly = {0};
+#endif
 
 	// query program options
 	if (argc >= 2) {
@@ -1204,6 +1492,35 @@ MAIN(argc, argv)
 		printf("open fail=%d\n", ret);
 		goto exit;
 	}
+#ifdef AUDIO_OUT_ENABLE
+	//open output module
+	outonly.sample_rate_max = AUDOUT_SR; //assign by user
+	ret = open_module_audio(&outonly);
+	if(ret != HD_OK) {
+		printf("open fail=%d\n", ret);
+		goto exit;
+	}
+
+	//set audioout parameter
+	outonly.sample_rate = AUDOUT_SR; //assign by user
+	ret = set_aout_param(outonly.out_ctrl, outonly.out_path, outonly.sample_rate);
+	if (ret != HD_OK) {
+		printf("set out fail=%d\n", ret);
+		goto exit;
+	}	
+
+	//create output thread
+	ret = pthread_create(&out_thread_id, NULL, playback_thread, (void *)&outonly);
+	if (ret < 0) {
+		printf("create playback thread failed");
+		goto exit;
+	}
+
+	//start output module
+	hd_audioout_start(outonly.out_path);	
+#endif
+
+
 
 	// create flow_thread
 	ret = pthread_create(&stream2[0].flow_thread_id, NULL, flow_thread, (void *)stream_list);
@@ -1212,120 +1529,27 @@ MAIN(argc, argv)
 		goto exit;
 	}
 
-	// query user key
-	printf("Enter q to exit\n");
-	printf("\r\nif you want to record 1, enter \"s\" to trigger !!\r\n");
-
+	//1. FLOW_ON_OPEN
 	stream2[0].flow_run = FLOW_ON_OPEN;
 	while (stream2[0].flow_run != 0) usleep(100); //wait unitl flow idle
 
 	stream2[0].save_count = 0;
 
-
-#if 1
-
-
-
-if(1)
-{
+	//2. FLOW_ON_REC
 	stream2[0].sel_rec_size = 0;
 	stream2[0].enc_type = 1;
 	stream2[0].flow_run = FLOW_ON_REC; //start record
 	while (stream2[0].flow_state != FLOW_ON_REC) usleep(100); //wait unitl flow record		
-}
-	while (1) {
-		key = GETCHAR();
 
+	//Recording... ooSSoo
+	sleep(10);
 
-		if (key == 's') {
-			if (stream2[0].flow_run == 0) { //flow is idle
-				stream2[0].flow_run = FLOW_ON_REC; //start record
-	            while (stream2[0].flow_state != FLOW_ON_REC) usleep(100); //wait unitl flow record
-			} else { //flow is still under record
-				stream2[0].flow_run = FLOW_ON_STOP; //stop record
-	            while (stream2[0].flow_state != FLOW_ON_STOP) usleep(100); //wait unitl flow stop
-	            while (stream2[0].flow_run != 0) usleep(100); //wait unitl flow idle
-			}
-		}
+	//3. FLOW_ON_STOP
+	stream2[0].flow_run = FLOW_ON_STOP; //stop record
+	while (stream2[0].flow_state != FLOW_ON_STOP) usleep(100); //wait unitl flow stop
+	while (stream2[0].flow_run != 0) usleep(100); //wait unitl flow idle
 
-		if (key == 'q' || key == 0x3) {
-			// quit thread
-			if((stream2[0].flow_state == FLOW_ON_STOP)||(stream2[0].flow_state == FLOW_ON_OPEN)){
-    			break;
-            } else{
-                printf("stop record first\r\n");
-            }
-		}
-
-		#if (DEBUG_MENU == 1)
-		if (key == 'd') {
-			// enter debug menu
-			hd_debug_run_menu();
-			printf("\r\nEnter q to exit, Enter d to debug\r\n");
-		}
-		#endif
-	}
-
-#else
-
-
-
-	while (1) {
-		key = GETCHAR();
-		if (key == '0') {
-			printf("select CODEC type: h265 !!\r\n");
-            stream2[0].enc_type = 0;
-		}
-		if (key == '1') {
-			printf("select CODEC type: h264 !!\r\n");
-            stream2[0].enc_type = 1;
-		}
-		if (key == '2') {
-			printf("select CODEC type: mjpg !!\r\n");
-            stream2[0].enc_type = 2;
-		}
-
-		if (key == 'x') {
-			printf("select SIZE 0: %lux%lu !!\r\n", rec_size[0].w, rec_size[0].h);
-			stream2[0].sel_rec_size = 0;
-		}
-		if (key == 'y') {
-			printf("select SIZE 1: %lux%lu !!\r\n", rec_size[1].w, rec_size[1].h);
-			stream2[0].sel_rec_size = 1;
-		}
-		if (key == 'z') {
-			printf("select SIZE 2: %lux%lu !!\r\n", rec_size[2].w, rec_size[2].h);
-			stream2[0].sel_rec_size = 2;
-		}
-
-		if (key == 's') {
-			if (stream2[0].flow_run == 0) { //flow is idle
-				stream2[0].flow_run = FLOW_ON_REC; //start record
-	            while (stream2[0].flow_state != FLOW_ON_REC) usleep(100); //wait unitl flow record
-			} else { //flow is still under record
-				stream2[0].flow_run = FLOW_ON_STOP; //stop record
-	            while (stream2[0].flow_state != FLOW_ON_STOP) usleep(100); //wait unitl flow stop
-	            while (stream2[0].flow_run != 0) usleep(100); //wait unitl flow idle
-			}
-		}
-		if (key == 'q' || key == 0x3) {
-			// quit thread
-			if((stream2[0].flow_state == FLOW_ON_STOP)||(stream2[0].flow_state == FLOW_ON_OPEN)){
-    			break;
-            } else{
-                printf("stop record first\r\n");
-            }
-		}
-
-		#if (DEBUG_MENU == 1)
-		if (key == 'd') {
-			// enter debug menu
-			hd_debug_run_menu();
-			printf("\r\nEnter q to exit, Enter d to debug\r\n");
-		}
-		#endif
-	}
-#endif 	
+	//4. FLOW_ON_CLOSE
 	while (stream2[0].flow_run != 0) usleep(100); //wait unitl flow idle
 	stream2[0].flow_run = FLOW_ON_CLOSE;
 	while (stream2[0].flow_state != FLOW_ON_CLOSE) usleep(100); //wait unitl flow idle
@@ -1333,6 +1557,11 @@ if(1)
 	stream2[0].flow_quit = 1;
 	// destroy save flow_thread
 	pthread_join(stream2[0].flow_thread_id, NULL);
+
+#ifdef AUDIO_OUT_ENABLE
+	//stop output module
+	hd_audioout_stop(outonly.out_path);
+#endif
 
 exit:
 	// close video_liveview modules (liveview)
@@ -1347,6 +1576,13 @@ exit:
 		printf("close fail=%d\n", ret);
 	}
 
+#ifdef AUDIO_OUT_ENABLE
+	//close audio_output module
+	ret = close_module_audio(&outonly);
+	if(ret != HD_OK) {
+		printf("close fail=%d\n", ret);
+	}
+#endif
 	// uninit all modules
 	ret = exit_module();
 	if (ret != HD_OK) {
@@ -1367,3 +1603,4 @@ exit:
 
 	return 0;
 }
+
